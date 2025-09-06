@@ -1,46 +1,85 @@
 #!/bin/bash
-# Configuração do diretório de dados do Nextcloud, detecção de discos e backup de dados existentes
 
-# Diretório padrão
-NEXTCLOUD_DATADIR="/var/www/nextcloud/data"
-USERS_LIST=()
+# -----------------------------
+# CONFIGURAÇÃO DE DIRETÓRIO DE DADOS DO NEXTCLOUD
+# -----------------------------
+DEFAULT_DATADIR="/var/www/html/nextcloud/data"
+MOUNT_POINT="/mnt/ncdata"
+SELECTED_DISK=""
+USER_CHOICE=""
 
-# Verifica se /mnt/ncdata existe
-if [ -d "/mnt/ncdata" ]; then
-    NEXTCLOUD_DATADIR="/mnt/ncdata"
-else
-    # Verifica se existe mais de um disco disponível
-    DISK_COUNT=$(lsblk -dn -o NAME | wc -l)
-    if [ "$DISK_COUNT" -gt 1 ]; then
-        CHOICE=$(whiptail --title "Diretório de dados" --menu "Mais de um disco detectado. Onde deseja montar o Nextcloud?" 15 60 3 \
-            "1" "Montar em /mnt/ncdata existente" \
-            "2" "Formatar e montar novo disco em /mnt/ncdata" 3>&1 1>&2 2>&3)
-        case $CHOICE in
-            1)
-                NEXTCLOUD_DATADIR="/mnt/ncdata"
-                ;;
-            2)
-                # Exemplo: formatar /dev/sdb e montar
-                mkfs.ext4 /dev/sdb
-                mkdir -p /mnt/ncdata
-                mount /dev/sdb /mnt/ncdata
-                NEXTCLOUD_DATADIR="/mnt/ncdata"
-                ;;
-        esac
-    else
-        echo "⚠️ Usando diretório padrão: $NEXTCLOUD_DATADIR"
-    fi
+echo "🔍 Verificando ponto de montagem $MOUNT_POINT..."
+
+# Verifica se o diretório existe
+if [ ! -d "$MOUNT_POINT" ]; then
+    echo "❌ Diretório $MOUNT_POINT não existe."
+    mkdir -p "$MOUNT_POINT"
+    echo "✅ Diretório $MOUNT_POINT criado."
 fi
 
-# Detecta usuários existentes no diretório
-if [ -d "$NEXTCLOUD_DATADIR" ]; then
-    for userdir in "$NEXTCLOUD_DATADIR"/*; do
-        if [ -d "$userdir" ]; then
-            USERS_LIST+=("$(basename "$userdir")")
+# Verifica se está montado
+if ! mountpoint -q "$MOUNT_POINT"; then
+    echo "❌ $MOUNT_POINT não está montado."
+
+    # Procura discos disponíveis (excluindo root e home)
+    AVAILABLE_DISKS=$(lsblk -dpno NAME,SIZE | grep -Ev "sr0|loop|$(df / | tail -1 | awk '{print $1}')" | awk '{print $1}')
+
+    if [ -n "$AVAILABLE_DISKS" ]; then
+        OPTIONS=()
+        i=1
+        for disk in $AVAILABLE_DISKS; do
+            OPTIONS+=("$i" "$disk")
+            ((i++))
+        done
+
+        OPTIONS+=("0" "Usar diretório padrão ($DEFAULT_DATADIR)")
+
+        USER_CHOICE=$(whiptail --title "Escolha do disco" --menu \
+            "Selecione um disco para montar em $MOUNT_POINT ou escolha 0 para usar o diretório padrão:" 20 70 10 \
+            "${OPTIONS[@]}" 3>&1 1>&2 2>&3)
+
+        if [ "$USER_CHOICE" = "0" ] || [ -z "$USER_CHOICE" ]; then
+            NEXTCLOUD_DATADIR="$DEFAULT_DATADIR"
+            echo "⚠️ Usando diretório padrão para dados: $NEXTCLOUD_DATADIR"
+        else
+            SELECTED_DISK=$(echo "$AVAILABLE_DISKS" | sed -n "${USER_CHOICE}p")
+            
+            # Pergunta se deseja formatar ou apenas montar
+            if whiptail --title "Formatação" --yesno "Deseja formatar $SELECTED_DISK antes de montar em $MOUNT_POINT? (Sim = Apagar tudo)" 10 60 3>&1 1>&2 2>&3; then
+                mkfs.ext4 "$SELECTED_DISK"
+                echo "✅ Disco formatado."
+            fi
+
+            # Monta o disco
+            mount "$SELECTED_DISK" "$MOUNT_POINT"
+            echo "✅ Disco $SELECTED_DISK montado em $MOUNT_POINT."
+
+            # Adiciona no fstab para montagem automática
+            UUID=$(blkid -s UUID -o value "$SELECTED_DISK")
+            if ! grep -q "$MOUNT_POINT" /etc/fstab; then
+                echo "UUID=$UUID $MOUNT_POINT ext4 defaults 0 2" >> /etc/fstab
+                echo "✅ Adicionado ao /etc/fstab para montagem automática."
+            fi
+
+            NEXTCLOUD_DATADIR="$MOUNT_POINT"
         fi
-    done
+    else
+        echo "⚠️ Nenhum disco adicional encontrado. Usando diretório padrão: $DEFAULT_DATADIR"
+        NEXTCLOUD_DATADIR="$DEFAULT_DATADIR"
+    fi
+else
+    echo "✅ $MOUNT_POINT já está montado."
+    NEXTCLOUD_DATADIR="$MOUNT_POINT"
 fi
 
-# Exportar variáveis
 export NEXTCLOUD_DATADIR
-export USERS_LIST
+echo "📂 Diretório de dados definido: $NEXTCLOUD_DATADIR"
+
+# -----------------------------
+# VERIFICA DADOS EXISTENTES
+# -----------------------------
+if [ -d "$NEXTCLOUD_DATADIR" ] && [ "$(ls -A "$NEXTCLOUD_DATADIR")" ]; then
+    EXISTING_USERS=$(ls "$NEXTCLOUD_DATADIR")
+    echo "⚠️ Dados de usuários existentes detectados: $EXISTING_USERS"
+    export EXISTING_USERS
+fi
