@@ -7,6 +7,7 @@ SCRIPTS_DIR="/var/scripts"
 REPO_BASE="https://raw.githubusercontent.com/Dieguim25/nextcloud/main"
 NEXTCLOUD_DIR="/var/www/nextcloud"
 NEXTCLOUD_DATADIR="/var/www/nextcloud/data"
+DEPENDENCIES_EXIST=false
 NEEDS_REBOOT=false
 
 # -----------------------------
@@ -32,49 +33,71 @@ check_dependencies() {
     php8.3-ldap php8.3-imap redis-server smbclient ffmpeg libreoffice-core)
 
     MISSING=()
+    INSTALLED=0
+
     for pkg in "${DEPENDENCIES[@]}"; do
-        dpkg -s "$pkg" &>/dev/null || MISSING+=("$pkg")
+        if ! dpkg -s "$pkg" &>/dev/null; then
+            MISSING+=("$pkg")
+        else
+            INSTALLED=$((INSTALLED + 1))
+        fi
     done
 
-    if [ ${#MISSING[@]} -eq 0 ]; then
-        echo "✅ Todas as dependências estão instaladas."
+    # Se algum pacote já estava instalado antes, setar true
+    if [ $INSTALLED -gt 0 ]; then
+        DEPENDENCIES_EXIST=true
     else
-        echo "⚠️ Pacotes faltando: ${MISSING[*]}"
-        whiptail --title "Dependências faltando" --msgbox "Os seguintes pacotes não estão instalados:\n${MISSING[*]}\nEles serão instalados agora." 15 70
+        DEPENDENCIES_EXIST=false
+    fi
+
+    # Instalar pacotes faltantes, mas não alterar DEPENDENCIES_EXIST
+    if [ ${#MISSING[@]} -ne 0 ]; then
+        echo "⚠️ Instalando dependências faltantes: ${MISSING[*]}"
         apt-get update
         apt-get install -y "${MISSING[@]}"
         NEEDS_REBOOT=true
+    else
+        echo "✅ Todas as dependências já estavam instaladas."
     fi
 }
 
-check_radical_mode() {
-    echo "🔍 Verificando instalações existentes..."
-    EXISTING=$(dpkg -l | grep -E "apache2|php8.3|postgresql|redis-server")
-    if [ -n "$EXISTING" ]; then
-        CHOICE=$(whiptail --title "Modo Radical" --menu "Pacotes detectados. Deseja continuar limpando o sistema?" 15 60 2 \
-            "1" "Remover todos e instalar do zero" \
-            "2" "Encerrar instalação" 3>&1 1>&2 2>&3)
-
-        case $CHOICE in
-            1)
-                echo "⚠️ Removendo pacotes existentes..."
-                apt-get remove --purge -y apache2* php8.3* postgresql* redis-server*
-                apt-get autoremove -y
-                apt-get clean
-                NEEDS_REBOOT=true
-                ;;
-            2)
-                echo "❌ Instalação encerrada pelo usuário."
-                exit 1
-                ;;
-        esac
+check_existing_installation() {
+    if [ "$DEPENDENCIES_EXIST" = false ]; then
+        echo "✅ Nenhuma dependência instalada previamente, pulando verificação de instalação existente."
+        return
     fi
+
+    echo "🔍 Pacotes existentes detectados, verificando instalação existente..."
+    CHOICE=$(whiptail --title "Instalação Existente" --menu "Pacotes detectados. Deseja continuar limpando o sistema?" 15 60 2 \
+        "1" "Remover todos e instalar do zero" \
+        "2" "Encerrar instalação" 3>&1 1>&2 2>&3)
+
+    case $CHOICE in
+        1)
+            echo "⚠️ Removendo pacotes existentes..."
+            apt-get remove --purge -y apache2* php8.3* postgresql* redis-server*
+            apt-get autoremove -y
+            apt-get clean
+            NEEDS_REBOOT=true
+            ;;
+        2)
+            echo "❌ Instalação encerrada pelo usuário."
+            exit 1
+            ;;
+    esac
 }
 
 reboot_if_needed() {
-    echo "🔄 Reiniciando sistema para aplicar mudanças..."
-    (sleep 5 && reboot) &
-    exit
+    if [ "$NEEDS_REBOOT" = true ]; then
+        if whiptail --title "Reinício necessário" --yesno "O servidor precisa reiniciar. Deseja reiniciar agora?" 10 60 3>&1 1>&2 2>&3; then
+            echo "🔄 Reiniciando sistema..."
+            reboot
+            exit
+        else
+            whiptail --title "Atenção" --msgbox "Após reinício, execute novamente o script para continuar a instalação." 10 60
+            exit
+        fi
+    fi
 }
 
 # -----------------------------
@@ -89,22 +112,17 @@ download_scripts
 # 2️⃣ Checar dependências
 check_dependencies
 
-# 3️⃣ Verificar modo radical / limpeza do sistema
-check_radical_mode
+# 3️⃣ Verificar instalações existentes
+check_existing_installation
 
-# 4️⃣ Perguntar sobre reboot somente se necessário
-if [ "$NEEDS_REBOOT" = true ]; then
-    read -p "Algumas mudanças exigem reinício. Deseja reiniciar agora? (s/N): " REBOOT_CHOICE
-    if [[ "$REBOOT_CHOICE" =~ ^[Ss]$ ]]; then
-        reboot_if_needed
-    fi
-fi
+# 4️⃣ Reinício se necessário
+reboot_if_needed
 
-# 5️⃣ Selecionar fuso horário e configurar locale, phone region e language
+# 5️⃣ Selecionar fuso horário interativo
 echo "⬇️ Selecionando fuso horário..."
 source "$SCRIPTS_DIR/setup_timezone.sh"
 
-# 6️⃣ Configurar diretório de dados (storage) e importar variáveis
+# 6️⃣ Configurar diretório de dados (storage)
 echo "⬇️ Configurando diretório de dados..."
 source "$SCRIPTS_DIR/setup_storage.sh"
 
@@ -166,37 +184,7 @@ fi
 
 (crontab -l 2>/dev/null; echo "0 3 * * * $CRON_SCRIPT >> /var/log/nextcloud_update_check.log 2>&1") | crontab -
 
-# 1️⃣2️⃣ Configurar auto-execução após reboot via systemd
-SERVICE_FILE="/etc/systemd/system/nextcloud-install.service"
-
-if [ ! -f "$SERVICE_FILE" ]; then
-    echo "⬇️ Criando serviço systemd para execução automática após reboot..."
-    cat <<EOF > "$SERVICE_FILE"
-[Unit]
-Description=Instalador Autônomo Nextcloud
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/bin/bash /var/scripts/nextcloud_install.sh
-User=root
-WorkingDirectory=/root
-StandardOutput=journal
-StandardError=journal
-Restart=no
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload
-    systemctl enable nextcloud-install.service
-    echo "✅ Serviço systemd criado e habilitado para iniciar após reboot."
-else
-    echo "⚠️ Serviço systemd já existe, pulando criação."
-fi
-
-# 1️⃣3️⃣ Conclusão
+# 1️⃣2️⃣ Conclusão
 NEXTCLOUD_VERSION=$(grep -oP "'version' => '\K[0-9]+\.[0-9]+\.[0-9]+'" "$NEXTCLOUD_DIR/version.php" 2>/dev/null || echo "desconhecida")
 echo "✅ Instalação do Nextcloud $NEXTCLOUD_VERSION concluída!"
 echo "🌐 Acesse: http://$NEXTCLOUD_DOMAIN ou https://$NEXTCLOUD_DOMAIN se SSL configurado"
