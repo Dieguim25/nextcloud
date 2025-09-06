@@ -4,7 +4,7 @@
 # VARIÁVEIS PRINCIPAIS
 # -----------------------------
 SCRIPTS_DIR="/var/scripts"
-REPO_BASE="https://raw.githubusercontent.com/user/nextcloud/mais"
+REPO_BASE="https://github.com/Dieguim25/nextcloud/main"
 NEXTCLOUD_DIR="/var/www/nextcloud"
 NEXTCLOUD_DATADIR="/var/www/nextcloud/data"
 
