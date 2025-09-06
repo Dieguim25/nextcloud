@@ -11,13 +11,21 @@ DEPENDENCIES_EXIST=false
 NEEDS_REBOOT=false
 
 # -----------------------------
+# VERIFICAÇÃO DE WHIPTAIL
+# -----------------------------
+if ! command -v whiptail &>/dev/null; then
+    echo "⚠️ whiptail não encontrado. Instalando..."
+    apt-get update
+    apt-get install -y whiptail
+fi
+
+# -----------------------------
 # FUNÇÕES AUXILIARES
 # -----------------------------
-
 download_scripts() {
     echo "⬇️ Baixando scripts auxiliares para $SCRIPTS_DIR..."
     mkdir -p "$SCRIPTS_DIR"
-    for script in setup_storage.sh setup_nextcloud.sh setup_users.sh setup_ssl.sh setup_timezone.sh; do
+    for script in setup_storage.sh setup_nextcloud.sh setup_users.sh setup_ssl.sh; do
         curl -sSL "$REPO_BASE/$script" -o "$SCRIPTS_DIR/$script"
         chmod +x "$SCRIPTS_DIR/$script"
     done
@@ -25,39 +33,26 @@ download_scripts() {
 }
 
 check_dependencies() {
-    echo "🔍 Verificando dependências essenciais..."
+    echo "🔍 Verificando dependências principais (PHP, PostgreSQL, Redis, Apache2)..."
+    DEPENDENCIES_EXIST=false
 
-    DEPENDENCIES=(apache2 libapache2-mod-fcgid php8.3 php8.3-fpm php8.3-cli php8.3-common \
-    php8.3-pgsql php8.3-curl php8.3-gd php8.3-mbstring php8.3-intl php8.3-xml php8.3-zip \
-    php8.3-bcmath php8.3-apcu php8.3-redis php8.3-memcached php8.3-imagick php8.3-gmp \
-    php8.3-ldap php8.3-imap redis-server smbclient ffmpeg libreoffice-core)
-
-    MISSING=()
-    INSTALLED=0
-
-    for pkg in "${DEPENDENCIES[@]}"; do
-        if ! dpkg -s "$pkg" &>/dev/null; then
-            MISSING+=("$pkg")
-        else
-            INSTALLED=$((INSTALLED + 1))
-        fi
-    done
-
-    # Se algum pacote já estava instalado antes, setar true
-    if [ $INSTALLED -gt 0 ]; then
+    if dpkg -l | grep -q "php8"; then
         DEPENDENCIES_EXIST=true
-    else
-        DEPENDENCIES_EXIST=false
+    fi
+    if dpkg -l | grep -q "postgresql"; then
+        DEPENDENCIES_EXIST=true
+    fi
+    if dpkg -l | grep -q "redis-server"; then
+        DEPENDENCIES_EXIST=true
+    fi
+    if dpkg -l | grep -q "apache2"; then
+        DEPENDENCIES_EXIST=true
     fi
 
-    # Instalar pacotes faltantes, mas não alterar DEPENDENCIES_EXIST
-    if [ ${#MISSING[@]} -ne 0 ]; then
-        echo "⚠️ Instalando dependências faltantes: ${MISSING[*]}"
-        apt-get update
-        apt-get install -y "${MISSING[@]}"
-        NEEDS_REBOOT=true
+    if [ "$DEPENDENCIES_EXIST" = true ]; then
+        echo "⚠️ Pelo menos uma das dependências principais já está instalada."
     else
-        echo "✅ Todas as dependências já estavam instaladas."
+        echo "✅ Nenhuma dependência principal instalada, será feita a instalação completa."
     fi
 }
 
@@ -67,21 +62,18 @@ check_existing_installation() {
         return
     fi
 
-    echo "🔍 Pacotes existentes detectados, verificando instalação existente..."
     CHOICE=$(whiptail --title "Instalação Existente" --menu "Pacotes detectados. Deseja continuar limpando o sistema?" 15 60 2 \
         "1" "Remover todos e instalar do zero" \
         "2" "Encerrar instalação" 3>&1 1>&2 2>&3)
 
     case $CHOICE in
         1)
-            echo "⚠️ Removendo pacotes existentes..."
-            apt-get remove --purge -y apache2* php8.3* postgresql* redis-server*
+            apt-get remove --purge -y apache2* php8.* postgresql* redis-server*
             apt-get autoremove -y
             apt-get clean
             NEEDS_REBOOT=true
             ;;
         2)
-            echo "❌ Instalação encerrada pelo usuário."
             exit 1
             ;;
     esac
@@ -90,7 +82,6 @@ check_existing_installation() {
 reboot_if_needed() {
     if [ "$NEEDS_REBOOT" = true ]; then
         if whiptail --title "Reinício necessário" --yesno "O servidor precisa reiniciar. Deseja reiniciar agora?" 10 60 3>&1 1>&2 2>&3; then
-            echo "🔄 Reiniciando sistema..."
             reboot
             exit
         else
@@ -101,78 +92,90 @@ reboot_if_needed() {
 }
 
 # -----------------------------
+# CONFIGURAÇÃO DE TIMEZONE, LOCALE, PHONE REGION E LANGUAGE
+# -----------------------------
+# Valores padrão brasileiros
+DEFAULT_TZ="America/Sao_Paulo"
+DEFAULT_LOCALE_VAL="pt_BR"
+DEFAULT_PHONE_REGION_VAL="BR"
+DEFAULT_LANGUAGE_VAL="pt"
+
+# NEXTCLOUD_TIMEZONE
+NEXTCLOUD_TIMEZONE=$(whiptail --title "Fuso Horário" \
+    --inputbox "Digite o fuso horário do servidor:" 10 60 "$DEFAULT_TZ" 3>&1 1>&2 2>&3)
+if [[ -z "$NEXTCLOUD_TIMEZONE" || "$NEXTCLOUD_TIMEZONE" =~ ^[[:space:]]*$ ]]; then
+    NEXTCLOUD_TIMEZONE="$DEFAULT_TZ"
+fi
+timedatectl set-timezone "$NEXTCLOUD_TIMEZONE"
+
+# DEFAULT_LOCALE
+DEFAULT_LOCALE=$(whiptail --title "Locale" \
+    --inputbox "Digite o locale padrão do Nextcloud:" 10 60 "$DEFAULT_LOCALE_VAL" 3>&1 1>&2 2>&3)
+if [[ -z "$DEFAULT_LOCALE" || "$DEFAULT_LOCALE" =~ ^[[:space:]]*$ ]]; then
+    DEFAULT_LOCALE="$DEFAULT_LOCALE_VAL"
+fi
+
+# DEFAULT_PHONE_REGION
+DEFAULT_PHONE_REGION=$(whiptail --title "Phone Region" \
+    --inputbox "Digite a região telefônica padrão do Nextcloud:" 10 60 "$DEFAULT_PHONE_REGION_VAL" 3>&1 1>&2 2>&3)
+if [[ -z "$DEFAULT_PHONE_REGION" || "$DEFAULT_PHONE_REGION" =~ ^[[:space:]]*$ ]]; then
+    DEFAULT_PHONE_REGION="$DEFAULT_PHONE_REGION_VAL"
+fi
+
+# FORCE_LANGUAGE
+FORCE_LANGUAGE=$(whiptail --title "Idioma" \
+    --inputbox "Digite o idioma padrão do Nextcloud:" 10 60 "$DEFAULT_LANGUAGE_VAL" 3>&1 1>&2 2>&3)
+if [[ -z "$FORCE_LANGUAGE" || "$FORCE_LANGUAGE" =~ ^[[:space:]]*$ ]]; then
+    FORCE_LANGUAGE="$DEFAULT_LANGUAGE_VAL"
+fi
+
+export NEXTCLOUD_TIMEZONE DEFAULT_LOCALE DEFAULT_PHONE_REGION FORCE_LANGUAGE
+
+echo "✅ Configurações definidas:"
+echo "🌐 Timezone: $NEXTCLOUD_TIMEZONE"
+echo "🌐 Locale: $DEFAULT_LOCALE"
+echo "🌐 Phone Region: $DEFAULT_PHONE_REGION"
+echo "🌐 Language: $FORCE_LANGUAGE"
+
+# -----------------------------
 # EXECUÇÃO PRINCIPAL
 # -----------------------------
 clear
 echo "🚀 Iniciando instalação autônoma do Nextcloud"
 
-# 1️⃣ Baixar scripts auxiliares
 download_scripts
-
-# 2️⃣ Checar dependências
 check_dependencies
-
-# 3️⃣ Verificar instalações existentes
 check_existing_installation
-
-# 4️⃣ Reinício se necessário
 reboot_if_needed
 
-# 5️⃣ Selecionar fuso horário interativo
-echo "⬇️ Selecionando fuso horário..."
-source "$SCRIPTS_DIR/setup_timezone.sh"
-
-# 6️⃣ Configurar diretório de dados (storage)
-echo "⬇️ Configurando diretório de dados..."
+# Diretório de dados
 source "$SCRIPTS_DIR/setup_storage.sh"
 
-# 7️⃣ Perguntar domínio para Nextcloud
+# Domínio Nextcloud
 NEXTCLOUD_DOMAIN=$(whiptail --inputbox "Digite o domínio para o Nextcloud:" 10 60 3>&1 1>&2 2>&3)
 export NEXTCLOUD_DOMAIN
 
-# 8️⃣ Instalar Nextcloud, banco, Redis, Apache, fuso horário e locale
-echo "⬇️ Instalando Nextcloud e configurando banco/Apache/Redis..."
+# Instalar Nextcloud, banco, Apache, Redis
 source "$SCRIPTS_DIR/setup_nextcloud.sh"
 
-# 9️⃣ Configurar usuários existentes e admin
-echo "⬇️ Configurando usuários e sincronizando dados..."
+# Configurar usuários
 source "$SCRIPTS_DIR/setup_users.sh"
 
-# 🔟 Configurar SSL/HTTPS (opcional)
+# SSL opcional
 if whiptail --title "SSL/HTTPS" --yesno "Deseja configurar HTTPS com Let’s Encrypt?" 10 60 3>&1 1>&2 2>&3; then
-    echo "⬇️ Configurando SSL/HTTPS..."
     source "$SCRIPTS_DIR/setup_ssl.sh"
-else
-    echo "⚠️ SSL não configurado. Lembre-se de configurar HTTPS manualmente."
 fi
 
-# 1️⃣1️⃣ Criar cron de verificação de updates
-echo "⬇️ Configurando cron para verificação automática de atualizações do Nextcloud"
+# Cron de atualizações
 CRON_SCRIPT="$SCRIPTS_DIR/nextcloud_check_update.sh"
-
 if [ ! -f "$CRON_SCRIPT" ]; then
 cat <<'EOF' > "$CRON_SCRIPT"
 #!/bin/bash
 NEXTCLOUD_DIR="/var/www/nextcloud"
-
-get_installed_version() {
-    if [ -f "$NEXTCLOUD_DIR/version.php" ]; then
-        grep -oP "'version' => '\K[0-9]+\.[0-9]+\.[0-9]+'" "$NEXTCLOUD_DIR/version.php"
-    else
-        echo "desconhecida"
-    fi
-}
-
-get_latest_version() {
-    curl -s https://nextcloud.com/changelog/ | grep -oP 'Version \K[0-9]+\.[0-9]+\.[0-9]+' | head -n 1
-}
-
-INSTALLED=$(get_installed_version)
-LATEST=$(get_latest_version)
-
+INSTALLED=$(grep -oP "'version' => '\K[0-9]+\.[0-9]+\.[0-9]+'" "$NEXTCLOUD_DIR/version.php" 2>/dev/null || echo "desconhecida")
+LATEST=$(curl -s https://nextcloud.com/changelog/ | grep -oP 'Version \K[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
 echo "🖥️  Versão instalada: $INSTALLED"
 echo "🌐 Última versão disponível: $LATEST"
-
 if [ "$INSTALLED" != "$LATEST" ]; then
     echo "⚠️ Atualização disponível: $LATEST"
 else
@@ -181,13 +184,10 @@ fi
 EOF
 chmod +x "$CRON_SCRIPT"
 fi
-
 (crontab -l 2>/dev/null; echo "0 3 * * * $CRON_SCRIPT >> /var/log/nextcloud_update_check.log 2>&1") | crontab -
 
-# 1️⃣2️⃣ Conclusão
+# Conclusão
 NEXTCLOUD_VERSION=$(grep -oP "'version' => '\K[0-9]+\.[0-9]+\.[0-9]+'" "$NEXTCLOUD_DIR/version.php" 2>/dev/null || echo "desconhecida")
 echo "✅ Instalação do Nextcloud $NEXTCLOUD_VERSION concluída!"
 echo "🌐 Acesse: http://$NEXTCLOUD_DOMAIN ou https://$NEXTCLOUD_DOMAIN se SSL configurado"
 echo "📄 Senhas dos usuários registradas em $NEXTCLOUD_DATADIR/$ADMIN_USER/files/Usuários.txt"
-echo "🌐 Timezone configurado: $NEXTCLOUD_TIMEZONE"
-echo "🌐 Locale: $DEFAULT_LOCALE, Phone Region: $DEFAULT_PHONE_REGION, Language: $FORCE_LANGUAGE"
